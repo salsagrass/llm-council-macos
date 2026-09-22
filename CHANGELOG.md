@@ -17,3 +17,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 - Repository sanitized for public distribution (generated artifacts and local-only files removed from tracking).
 - Compare mode, manual provider panes, isolated persistent web data stores, and all existing provider support remain intact alongside council mode.
+
+### Fixed
+
+- The shared prompt composer now accepts click focus and keyboard input reliably; `Command-Return` submits while plain Return inserts a new line.

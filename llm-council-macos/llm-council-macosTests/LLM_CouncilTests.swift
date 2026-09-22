@@ -4,11 +4,34 @@
 //
 //
 
+import AppKit
 import Foundation
 @testable import LLM_Council
 import Testing
 
 struct LLM_CouncilTests {
+    @MainActor
+    @Test("Composer focus updates preserve direct clicks and honor explicit requests")
+    func composerFocusDoesNotGetClearedAfterClick() throws {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 100),
+            styleMask: [],
+            backing: .buffered,
+            defer: false
+        )
+        let scrollView = NSTextView.scrollableTextView()
+        window.contentView = scrollView
+        let textView = try #require(scrollView.documentView as? NSTextView)
+
+        #expect(window.makeFirstResponder(textView))
+        CouncilComposerTextView.applyFocusRequest(false, to: textView)
+        #expect(window.firstResponder === textView)
+
+        window.makeFirstResponder(nil)
+        CouncilComposerTextView.applyFocusRequest(true, to: textView)
+        #expect(window.firstResponder === textView)
+    }
+
     @MainActor
     @Test("Built-in provider registry is stable")
     func builtInProviderRegistryContainsExpectedSix() {

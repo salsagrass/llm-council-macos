@@ -723,7 +723,7 @@ struct WorkspaceView: View {
     }
 }
 
-private struct CouncilComposerTextView: NSViewRepresentable {
+struct CouncilComposerTextView: NSViewRepresentable {
     @Binding var text: String
     @Binding var isFocused: Bool
     var onSubmit: () -> Void
@@ -733,7 +733,7 @@ private struct CouncilComposerTextView: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
+        let scrollView = NSTextView.scrollableTextView()
         scrollView.drawsBackground = false
         scrollView.hasVerticalScroller = false
         scrollView.hasHorizontalScroller = false
@@ -741,9 +741,13 @@ private struct CouncilComposerTextView: NSViewRepresentable {
         scrollView.borderType = .noBorder
         scrollView.setAccessibilityIdentifier("composer-text-editor")
 
-        let textView = NSTextView(frame: .zero)
+        guard let textView = scrollView.documentView as? NSTextView else {
+            assertionFailure("NSTextView.scrollableTextView() did not provide an NSTextView")
+            return scrollView
+        }
         textView.delegate = context.coordinator
         textView.isEditable = true
+        textView.isSelectable = true
         textView.isRichText = false
         textView.importsGraphics = false
         textView.allowsUndo = true
@@ -758,7 +762,6 @@ private struct CouncilComposerTextView: NSViewRepresentable {
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.lineBreakMode = .byWordWrapping
         textView.string = text
-        scrollView.documentView = textView
         return scrollView
     }
 
@@ -772,13 +775,17 @@ private struct CouncilComposerTextView: NSViewRepresentable {
             textView.string = text
         }
 
-        if isFocused {
-            if textView.window?.firstResponder !== textView {
-                textView.window?.makeFirstResponder(textView)
-            }
-        } else if textView.window?.firstResponder === textView {
-            textView.window?.makeFirstResponder(nil)
+        Self.applyFocusRequest(isFocused, to: textView)
+    }
+
+    static func applyFocusRequest(_ isFocused: Bool, to textView: NSTextView) {
+        guard isFocused,
+              let window = textView.window,
+              window.firstResponder !== textView
+        else {
+            return
         }
+        window.makeFirstResponder(textView)
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -815,7 +822,11 @@ private struct CouncilComposerTextView: NSViewRepresentable {
             }
 
             let modifiers = NSApp.currentEvent?.modifierFlags.intersection(.deviceIndependentFlagsMask) ?? []
-            if modifiers.contains(.shift) || modifiers.contains(.command) || modifiers.contains(.option) || modifiers.contains(.control) {
+            guard modifiers.contains(.command),
+                  !modifiers.contains(.shift),
+                  !modifiers.contains(.option),
+                  !modifiers.contains(.control)
+            else {
                 return false
             }
 
