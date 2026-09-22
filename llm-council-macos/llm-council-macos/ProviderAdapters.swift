@@ -2,21 +2,47 @@
 //  ProviderAdapters.swift
 //  LLM Council
 //
-//
 
 import Foundation
 
-struct SelectorBasedProviderAdapter: ProviderAutomationAdapter {
-    let providerID: ProviderID
+private struct ProviderDOMConfiguration {
     let inputSelectors: [String]
     let sendButtonSelectors: [String]
+    let responseSelectors: [String]
+    let streamingSelectors: [String]
+    let loginSelectors: [String]
+    let rateLimitPhrases: [String]
+}
 
-    func makeSendScript(prompt: String) -> String {
-        JavaScriptBridgeBuilder.makeSendScript(
-            prompt: prompt,
-            inputSelectors: inputSelectors,
-            sendButtonSelectors: sendButtonSelectors
+struct SelectorBasedProviderAdapter: ProviderAutomationAdapter {
+    let providerID: ProviderID
+    fileprivate let configuration: ProviderDOMConfiguration
+
+    func makeSubmitScript(message: String) -> String {
+        ProviderJavaScript.makeSubmitScript(
+            message: message,
+            inputSelectors: configuration.inputSelectors,
+            sendButtonSelectors: configuration.sendButtonSelectors
         )
+    }
+
+    func makeCompletionProbeScript() -> String {
+        ProviderJavaScript.makeCompletionProbeScript(
+            responseSelectors: configuration.responseSelectors,
+            streamingSelectors: configuration.streamingSelectors,
+            rateLimitPhrases: configuration.rateLimitPhrases
+        )
+    }
+
+    func makeAuthenticationProbeScript() -> String {
+        ProviderJavaScript.makeAuthenticationProbeScript(
+            inputSelectors: configuration.inputSelectors,
+            loginSelectors: configuration.loginSelectors
+        )
+    }
+
+    func makeRecoveryScript() -> String {
+        ProviderJavaScript.makeRecoveryScript()
     }
 }
 
@@ -24,58 +50,123 @@ enum ProviderAdapterRegistry {
     static let adapters: [ProviderID: any ProviderAutomationAdapter] = [
         .chatGPT: SelectorBasedProviderAdapter(
             providerID: .chatGPT,
-            inputSelectors: [
-                "#prompt-textarea",
-                "textarea[data-id='root']",
-                "textarea[placeholder*='Message']",
-                "textarea",
-                "[contenteditable='true']",
-            ],
-            sendButtonSelectors: [
-                "button[data-testid='send-button']",
-                "button[data-testid*='send']",
-                "button[data-testid='fruitjuice-send-button']",
-                "button[aria-label*='Send']",
-                "button[aria-label*='send']",
-                "button[type='submit']",
-            ]
+            configuration: ProviderDOMConfiguration(
+                inputSelectors: [
+                    "#prompt-textarea",
+                    "textarea[data-id='root']",
+                    "textarea[placeholder*='Message']",
+                    "[contenteditable='true'][data-virtualkeyboard]",
+                    "textarea",
+                ],
+                sendButtonSelectors: [
+                    "button[data-testid='send-button']",
+                    "button[data-testid='fruitjuice-send-button']",
+                    "button[aria-label*='Send']",
+                    "button[type='submit']",
+                ],
+                responseSelectors: [
+                    "[data-message-author-role='assistant']",
+                    "article[data-testid^='conversation-turn-'] [data-message-author-role='assistant']",
+                ],
+                streamingSelectors: [
+                    "button[data-testid='stop-button']",
+                    "button[aria-label*='Stop generating']",
+                    "button[aria-label*='stop generating']",
+                ],
+                loginSelectors: [
+                    "a[href*='auth/login']",
+                    "button[data-testid*='login']",
+                ],
+                rateLimitPhrases: [
+                    "you've reached your limit",
+                    "you have reached your limit",
+                    "usage limit",
+                    "too many requests",
+                ]
+            )
         ),
         .claude: SelectorBasedProviderAdapter(
             providerID: .claude,
-            inputSelectors: [
-                "div.ProseMirror",
-                "[contenteditable='true']",
-            ],
-            sendButtonSelectors: [
-                "button[aria-label='Send Message']",
-                "button[aria-label*='Send']",
-                "button[data-testid*='send']",
-                "button[class*='send']",
-                "button[type='submit']",
-            ]
+            configuration: ProviderDOMConfiguration(
+                inputSelectors: [
+                    "div.ProseMirror",
+                    "[contenteditable='true'][role='textbox']",
+                    "[contenteditable='true']",
+                ],
+                sendButtonSelectors: [
+                    "button[aria-label='Send Message']",
+                    "button[aria-label*='Send']",
+                    "button[data-testid*='send']",
+                    "button[type='submit']",
+                ],
+                responseSelectors: [
+                    "[data-testid='assistant-message']",
+                    "[data-is-streaming]",
+                    ".font-claude-response",
+                    "div[data-test-render-count] .prose",
+                ],
+                streamingSelectors: [
+                    "button[aria-label*='Stop']",
+                    "button[data-testid*='stop']",
+                    "[data-is-streaming='true']",
+                ],
+                loginSelectors: [
+                    "a[href*='login']",
+                    "button[data-testid*='login']",
+                ],
+                rateLimitPhrases: [
+                    "you are out of messages",
+                    "message limit",
+                    "usage limit",
+                    "rate limit",
+                ]
+            )
         ),
         .gemini: SelectorBasedProviderAdapter(
             providerID: .gemini,
-            inputSelectors: [
-                ".ql-editor[aria-label='Enter a prompt here']",
-                ".ql-editor",
-                "[contenteditable='true']",
-                "textarea",
-            ],
-            sendButtonSelectors: [
-                "button[aria-label='Send message']",
-                "button[aria-label*='Send']",
-                "button[class*='send']",
-                "button[type='submit']",
-            ]
+            configuration: ProviderDOMConfiguration(
+                inputSelectors: [
+                    ".ql-editor[aria-label='Enter a prompt here']",
+                    ".ql-editor",
+                    "rich-textarea [contenteditable='true']",
+                    "[contenteditable='true'][role='textbox']",
+                    "textarea",
+                ],
+                sendButtonSelectors: [
+                    "button[aria-label='Send message']",
+                    "button[aria-label*='Send']",
+                    "button.send-button",
+                    "button[type='submit']",
+                ],
+                responseSelectors: [
+                    "model-response .model-response-text",
+                    "model-response message-content",
+                    "model-response",
+                    ".response-container-content",
+                ],
+                streamingSelectors: [
+                    "button[aria-label*='Stop response']",
+                    "button[aria-label*='Stop']",
+                    ".response-container-content.loading",
+                ],
+                loginSelectors: [
+                    "a[href*='accounts.google.com']",
+                    "a[aria-label*='Sign in']",
+                ],
+                rateLimitPhrases: [
+                    "you've reached your limit",
+                    "you have reached your limit",
+                    "rate limit",
+                    "try again later",
+                ]
+            )
         ),
-        .grok: SelectorBasedProviderAdapter(
+        .grok: genericAdapter(
             providerID: .grok,
             inputSelectors: [
                 "textarea[aria-label*='Ask']",
                 "textarea[placeholder*='Ask']",
                 "[contenteditable='true'][role='textbox']",
-                "[contenteditable='true']",
                 "textarea",
             ],
             sendButtonSelectors: [
@@ -84,7 +175,7 @@ enum ProviderAdapterRegistry {
                 "button[aria-label*='Send']",
             ]
         ),
-        .perplexity: SelectorBasedProviderAdapter(
+        .perplexity: genericAdapter(
             providerID: .perplexity,
             inputSelectors: [
                 "textarea[placeholder*='Ask']",
@@ -98,7 +189,7 @@ enum ProviderAdapterRegistry {
                 "button[type='submit']",
             ]
         ),
-        .deepSeek: SelectorBasedProviderAdapter(
+        .deepSeek: genericAdapter(
             providerID: .deepSeek,
             inputSelectors: [
                 "textarea[placeholder*='Ask']",
@@ -118,29 +209,57 @@ enum ProviderAdapterRegistry {
     static func adapter(for providerID: ProviderID) -> (any ProviderAutomationAdapter)? {
         adapters[providerID]
     }
+
+    private static func genericAdapter(
+        providerID: ProviderID,
+        inputSelectors: [String],
+        sendButtonSelectors: [String]
+    ) -> any ProviderAutomationAdapter {
+        SelectorBasedProviderAdapter(
+            providerID: providerID,
+            configuration: ProviderDOMConfiguration(
+                inputSelectors: inputSelectors,
+                sendButtonSelectors: sendButtonSelectors,
+                responseSelectors: [
+                    "[data-message-author-role='assistant']",
+                    "[data-testid*='assistant']",
+                    ".prose",
+                    ".markdown",
+                ],
+                streamingSelectors: [
+                    "button[aria-label*='Stop']",
+                    "button[data-testid*='stop']",
+                    "[data-is-streaming='true']",
+                ],
+                loginSelectors: ["a[href*='login']", "button[data-testid*='login']"],
+                rateLimitPhrases: ["rate limit", "usage limit", "too many requests"]
+            )
+        )
+    }
 }
 
-private enum JavaScriptBridgeBuilder {
-    static func makeSendScript(
-        prompt: String,
+private enum ProviderJavaScript {
+    static func makeSubmitScript(
+        message: String,
         inputSelectors: [String],
         sendButtonSelectors: [String]
     ) -> String {
-        let promptLiteral = jsonLiteral(prompt)
+        let messageLiteral = jsonLiteral(message)
         let inputSelectorsLiteral = jsonLiteral(inputSelectors)
         let sendButtonSelectorsLiteral = jsonLiteral(sendButtonSelectors)
 
         return """
         (async function() {
-          const prompt = \(promptLiteral);
+          const message = \(messageLiteral);
           const inputSelectors = \(inputSelectorsLiteral);
           const sendSelectors = \(sendButtonSelectorsLiteral);
           const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+          const visible = (node) => !!node && node.getClientRects().length > 0;
 
-          const findFirst = (selectors) => {
+          const findFirstVisible = (selectors) => {
             for (const selector of selectors) {
               try {
-                const node = document.querySelector(selector);
+                const node = Array.from(document.querySelectorAll(selector)).find(visible);
                 if (node) return node;
               } catch (error) {}
             }
@@ -150,15 +269,11 @@ private enum JavaScriptBridgeBuilder {
           const findSendButton = () => {
             for (const selector of sendSelectors) {
               try {
-                const buttons = Array.from(document.querySelectorAll(selector));
-                for (const button of buttons) {
+                for (const button of document.querySelectorAll(selector)) {
                   const disabled = button.disabled
                     || button.getAttribute("aria-disabled") === "true"
                     || button.classList.contains("disabled");
-                  const visible = button.getClientRects().length > 0;
-                  if (!disabled && visible) {
-                    return button;
-                  }
+                  if (!disabled && visible(button)) return button;
                 }
               } catch (error) {}
             }
@@ -168,13 +283,11 @@ private enum JavaScriptBridgeBuilder {
           const setPromptValue = (input, value) => {
             const isTextInput = input.tagName === "TEXTAREA" || input.tagName === "INPUT";
             if (isTextInput) {
-              const prototype = input.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+              const prototype = input.tagName === "TEXTAREA"
+                ? window.HTMLTextAreaElement.prototype
+                : window.HTMLInputElement.prototype;
               const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
-              if (setter) {
-                setter.call(input, value);
-              } else {
-                input.value = value;
-              }
+              if (setter) setter.call(input, value); else input.value = value;
               input.dispatchEvent(new Event("input", { bubbles: true }));
               input.dispatchEvent(new Event("change", { bubbles: true }));
               return;
@@ -189,109 +302,152 @@ private enum JavaScriptBridgeBuilder {
               if (!input.textContent || input.textContent.trim() !== String(value).trim()) {
                 input.textContent = value;
               }
-              input.dispatchEvent(new Event("input", { bubbles: true }));
+              input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
               input.dispatchEvent(new Event("change", { bubbles: true }));
               return;
             }
-
             input.textContent = value;
           };
 
-          const clickSend = () => {
+          const input = findFirstVisible(inputSelectors);
+          if (!input) return { ok: false, error: "input-not-found" };
+          input.click();
+          input.focus();
+          setPromptValue(input, message);
+
+          for (let attempt = 0; attempt < 30; attempt += 1) {
             const button = findSendButton();
             if (button) {
               button.click();
-              return true;
-            }
-            return false;
-          };
-
-          const input = findFirst(inputSelectors);
-          if (!input) {
-            return { ok: false, error: "input-not-found" };
-          }
-
-          input.click();
-          input.focus();
-          setPromptValue(input, prompt);
-
-          // Wait briefly for React/Quill/ProseMirror state updates to enable send.
-          for (let attempt = 0; attempt < 30; attempt += 1) {
-            if (clickSend()) {
               return { ok: true, method: "button" };
             }
             await sleep(60);
           }
 
-          // Fallback through form submission when available.
           const form = input.closest("form");
-          if (form) {
-            if (typeof form.requestSubmit === "function") {
-              form.requestSubmit();
-            } else if (typeof form.submit === "function") {
-              form.submit();
-            }
+          if (form && typeof form.requestSubmit === "function") {
+            form.requestSubmit();
             return { ok: true, method: "form" };
           }
 
-          // Last-resort key submission attempts.
-          input.dispatchEvent(
-            new KeyboardEvent("keydown", {
-              key: "Enter",
-              code: "Enter",
-              which: 13,
-              keyCode: 13,
-              metaKey: true,
-              bubbles: true,
-              cancelable: true
-            })
-          );
-          input.dispatchEvent(
-            new KeyboardEvent("keyup", {
-              key: "Enter",
-              code: "Enter",
-              which: 13,
-              keyCode: 13,
-              metaKey: true,
-              bubbles: true,
-              cancelable: true
-            })
-          );
-
-          input.dispatchEvent(
-            new KeyboardEvent("keydown", {
-              key: "Enter",
-              code: "Enter",
-              which: 13,
-              keyCode: 13,
-              bubbles: true,
-              cancelable: true
-            })
-          );
-          input.dispatchEvent(
-            new KeyboardEvent("keyup", {
-              key: "Enter",
-              code: "Enter",
-              which: 13,
-              keyCode: 13,
-              bubbles: true,
-              cancelable: true
-            })
-          );
-
+          input.dispatchEvent(new KeyboardEvent("keydown", {
+            key: "Enter", code: "Enter", which: 13, keyCode: 13,
+            bubbles: true, cancelable: true
+          }));
+          input.dispatchEvent(new KeyboardEvent("keyup", {
+            key: "Enter", code: "Enter", which: 13, keyCode: 13,
+            bubbles: true, cancelable: true
+          }));
+          await sleep(100);
           return { ok: false, error: "send-not-triggered" };
+        })();
+        """
+    }
+
+    static func makeCompletionProbeScript(
+        responseSelectors: [String],
+        streamingSelectors: [String],
+        rateLimitPhrases: [String]
+    ) -> String {
+        """
+        (function() {
+          const responseSelectors = \(jsonLiteral(responseSelectors));
+          const streamingSelectors = \(jsonLiteral(streamingSelectors));
+          const rateLimitPhrases = \(jsonLiteral(rateLimitPhrases));
+          const visible = (node) => !!node && node.getClientRects().length > 0;
+          const nodes = [];
+          const seen = new Set();
+
+          for (const selector of responseSelectors) {
+            try {
+              for (const node of document.querySelectorAll(selector)) {
+                if (!seen.has(node) && visible(node)) {
+                  seen.add(node);
+                  nodes.push(node);
+                }
+              }
+            } catch (error) {}
+          }
+
+          const latest = nodes.length ? nodes[nodes.length - 1] : null;
+          const text = latest ? (latest.innerText || latest.textContent || "").trim() : "";
+          let isStreaming = false;
+          for (const selector of streamingSelectors) {
+            try {
+              if (Array.from(document.querySelectorAll(selector)).some(visible)) {
+                isStreaming = true;
+                break;
+              }
+            } catch (error) {}
+          }
+          if (latest) {
+            isStreaming = isStreaming
+              || latest.getAttribute("data-is-streaming") === "true"
+              || latest.getAttribute("aria-busy") === "true";
+          }
+
+          const bodyText = (document.body?.innerText || "").toLowerCase();
+          const matchedLimit = rateLimitPhrases.find((phrase) => bodyText.includes(phrase.toLowerCase())) || null;
+          return {
+            ok: true,
+            responseCount: nodes.length,
+            text,
+            isStreaming,
+            rateLimited: !!matchedLimit,
+            rateLimitMessage: matchedLimit || ""
+          };
+        })();
+        """
+    }
+
+    static func makeAuthenticationProbeScript(
+        inputSelectors: [String],
+        loginSelectors: [String]
+    ) -> String {
+        """
+        (function() {
+          const inputSelectors = \(jsonLiteral(inputSelectors));
+          const loginSelectors = \(jsonLiteral(loginSelectors));
+          const visible = (node) => !!node && node.getClientRects().length > 0;
+          const hasVisible = (selectors) => selectors.some((selector) => {
+            try { return Array.from(document.querySelectorAll(selector)).some(visible); }
+            catch (error) { return false; }
+          });
+          const inputFound = hasVisible(inputSelectors);
+          const loginFound = hasVisible(loginSelectors);
+          return { authenticated: inputFound, inputFound, loginFound, readyState: document.readyState };
+        })();
+        """
+    }
+
+    static func makeRecoveryScript() -> String {
+        """
+        (function() {
+          const selectors = [
+            "button[aria-label*='Retry']",
+            "button[aria-label*='Try again']",
+            "button[data-testid*='retry']"
+          ];
+          for (const selector of selectors) {
+            try {
+              const button = Array.from(document.querySelectorAll(selector))
+                .find((node) => node.getClientRects().length > 0 && !node.disabled);
+              if (button) {
+                button.click();
+                return { ok: true, method: "button" };
+              }
+            } catch (error) {}
+          }
+          return { ok: true, method: "reload-required" };
         })();
         """
     }
 
     private static func jsonLiteral<T: Encodable>(_ value: T) -> String {
         let encoder = JSONEncoder()
-        guard
-            let data = try? encoder.encode(value),
-            let encoded = String(data: data, encoding: .utf8)
-        else {
-            return "\"\""
-        }
+        guard let data = try? encoder.encode(value),
+              let encoded = String(data: data, encoding: .utf8)
+        else { return "\"\"" }
         return encoded
     }
 }

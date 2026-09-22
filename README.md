@@ -14,7 +14,12 @@ Comparing responses across multiple model providers is slow when every prompt ha
 
 - Multi-pane macOS workspace for provider web UIs
 - Shared composer with send-to-visible/send-to-included flows
-- Focus mode and compare mode
+- Compare, Council, Thorough Council, and Rigorous Council modes
+- Independent answers, blind peer review, revised positions, and ChatGPT Chairman synthesis
+- Optional Claude/Gemini ratify-or-dissent round
+- Fresh provider conversations by default for council runs
+- Locally persisted council transcripts with intermediate responses, retries, and structured event logs
+- Focus mode and direct/manual provider use
 - Layout presets, pane paging, and zoom controls
 - Prompt history, presets, and saved sessions
 - Local-first persistence using `UserDefaults`
@@ -31,12 +36,17 @@ Comparing responses across multiple model providers is slow when every prompt ha
 
 Provider websites change over time. Automation adapters may need updates when provider DOM structures change.
 
+Council mode currently uses ChatGPT, Claude, and Gemini. ChatGPT is always the
+Chairman and cannot be removed from a council run. Compare mode retains all six
+providers.
+
 ## Privacy and Data Model
 
 - Local-first: workspace state, history, presets, and saved sessions are stored locally on your machine.
 - No built-in cloud sync.
 - No provider API keys are required by this app.
 - You must use your own provider accounts through each provider's web interface.
+- Council transcripts are stored as JSON in the app's Application Support directory.
 
 ## Build From Source (macOS)
 
@@ -66,6 +76,13 @@ Quick path:
 - This app automates third-party websites; UI changes can break automation.
 - Only activated/mounted provider panes can receive automated sends.
 - Provider login/session state is managed by each provider website in its pane.
+- Council completion detection relies on provider-specific WebView adapters and may need maintenance when a provider changes its site.
+
+## Council Architecture
+
+See [docs/council-protocol.md](docs/council-protocol.md) for the repository
+audit, extension points, deliberation state machine, and WebView adapter
+boundary.
 
 ## Project Status
 

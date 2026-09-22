@@ -128,10 +128,13 @@ struct ContentView: View {
                     Button {
                         store.requestSendCurrentPrompt()
                     } label: {
-                        Label("Send", systemImage: "paperplane.fill")
+                        Label(
+                            chrome.councilMode.isCouncil ? "Start Council" : "Send",
+                            systemImage: chrome.councilMode.isCouncil ? "person.3.sequence.fill" : "paperplane.fill"
+                        )
                     }
                     .disabled(WorkspaceStore.normalizedPrompt(store.composerText).isEmpty)
-                    .help("Send the current prompt to the included providers.")
+                    .help(chrome.councilMode.isCouncil ? "Start the selected council protocol." : "Send the current prompt to the included providers.")
                     .accessibilityIdentifier("toolbar-send-button")
                     .controlSize(CouncilControls.compact)
 

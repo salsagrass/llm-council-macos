@@ -10,11 +10,16 @@ import SwiftUI
 import WebKit
 
 @MainActor
-final class WebViewHub: ObservableObject {
+final class WebViewHub: ObservableObject, CouncilProviderClient {
     private static let supportedURLSchemes: Set<String> = ["http", "https"]
 
     private var webViews: [ProviderID: WKWebView] = [:]
+    private var adapters: [ProviderID: any ProviderAutomationAdapter] = [:]
     private var currentZoom = 1.0
+
+    func configure(adapters: [ProviderID: any ProviderAutomationAdapter]) {
+        self.adapters = adapters
+    }
 
     func register(providerID: ProviderID, webView: WKWebView) {
         webViews[providerID] = webView
@@ -23,6 +28,19 @@ final class WebViewHub: ObservableObject {
 
     func cachedWebView(providerID: ProviderID) -> WKWebView? {
         webViews[providerID]
+    }
+
+    func waitForMountedProviders(_ providerIDs: [ProviderID], timeout: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if providerIDs.allSatisfy({ webViews[$0] != nil }) { return true }
+            do {
+                try await Task.sleep(for: .milliseconds(100))
+            } catch {
+                return false
+            }
+        }
+        return providerIDs.allSatisfy { webViews[$0] != nil }
     }
 
     func goBack(providerID: ProviderID) {
@@ -164,52 +182,214 @@ final class WebViewHub: ObservableObject {
         using adapters: [ProviderID: any ProviderAutomationAdapter],
         completion: @escaping ([WebAutomationResult]) -> Void
     ) {
+        configure(adapters: adapters)
         guard !providerIDs.isEmpty else {
             completion([])
             return
         }
 
-        var results: [WebAutomationResult] = []
-        let group = DispatchGroup()
-
-        for providerID in providerIDs {
-            guard let webView = webViews[providerID] else {
-                results.append(WebAutomationResult(providerID: providerID, success: false, message: "Web view unavailable"))
-                continue
-            }
-            guard let adapter = adapters[providerID] else {
-                results.append(WebAutomationResult(providerID: providerID, success: false, message: "Missing adapter"))
-                continue
-            }
-
-            group.enter()
-            webView.evaluateJavaScript(adapter.makeSendScript(prompt: prompt)) { value, error in
-                defer { group.leave() }
-
-                if let error {
-                    results.append(
-                        WebAutomationResult(
+        Task { @MainActor in
+            let tasks = providerIDs.map { providerID in
+                Task { @MainActor in
+                    do {
+                        _ = try await self.submit(prompt, to: providerID)
+                        return WebAutomationResult(providerID: providerID, success: true, message: "Sent")
+                    } catch {
+                        return WebAutomationResult(
                             providerID: providerID,
                             success: false,
-                            message: "Automation failed: \(error.localizedDescription)"
+                            message: error.localizedDescription
                         )
-                    )
-                    return
-                }
-
-                if let dictionary = value as? [String: Any],
-                   let ok = dictionary["ok"] as? Bool
-                {
-                    let message = (dictionary["error"] as? String) ?? (dictionary["method"] as? String) ?? "ok"
-                    results.append(WebAutomationResult(providerID: providerID, success: ok, message: message))
-                } else {
-                    results.append(WebAutomationResult(providerID: providerID, success: true, message: "Sent"))
+                    }
                 }
             }
+            var results: [WebAutomationResult] = []
+            for task in tasks {
+                results.append(await task.value)
+            }
+            completion(results)
+        }
+    }
+
+    func submit(_ message: String, to providerID: ProviderID) async throws -> ProviderSubmissionReceipt {
+        let webView = try requiredWebView(for: providerID)
+        let adapter = try requiredAdapter(for: providerID)
+        let baseline = try await completionProbe(providerID: providerID, webView: webView, adapter: adapter)
+        let value = try await evaluate(adapter.makeSubmitScript(message: message), in: webView)
+
+        guard let dictionary = value as? [String: Any],
+              let ok = dictionary["ok"] as? Bool,
+              ok
+        else {
+            let message = (value as? [String: Any])?["error"] as? String ?? "send-not-confirmed"
+            throw CouncilProviderClientError.submissionFailed(providerID, message)
         }
 
-        group.notify(queue: .main) {
-            completion(results)
+        return ProviderSubmissionReceipt(
+            providerID: providerID,
+            baselineResponseCount: baseline.responseCount,
+            baselineResponseText: baseline.text,
+            submittedAt: .now
+        )
+    }
+
+    func waitForCompletion(
+        from receipt: ProviderSubmissionReceipt,
+        timeout: TimeInterval
+    ) async throws -> String {
+        let webView = try requiredWebView(for: receipt.providerID)
+        let adapter = try requiredAdapter(for: receipt.providerID)
+        let deadline = Date().addingTimeInterval(timeout)
+        var lastCandidate = ""
+        var stableProbeCount = 0
+
+        while Date() < deadline {
+            try Task.checkCancellation()
+            let probe = try await completionProbe(
+                providerID: receipt.providerID,
+                webView: webView,
+                adapter: adapter
+            )
+
+            if probe.rateLimited {
+                throw CouncilProviderClientError.rateLimited(
+                    receipt.providerID,
+                    probe.rateLimitMessage.isEmpty ? "provider usage limit" : probe.rateLimitMessage
+                )
+            }
+
+            let isNewResponse = probe.responseCount > receipt.baselineResponseCount
+                || (!probe.text.isEmpty && probe.text != receipt.baselineResponseText)
+            if isNewResponse, !probe.isStreaming, !probe.text.isEmpty {
+                if probe.text == lastCandidate {
+                    stableProbeCount += 1
+                } else {
+                    lastCandidate = probe.text
+                    stableProbeCount = 1
+                }
+                if stableProbeCount >= 2 {
+                    return probe.text
+                }
+            } else {
+                stableProbeCount = 0
+            }
+
+            try await Task.sleep(for: .milliseconds(750))
+        }
+
+        throw CouncilProviderClientError.timedOut(receipt.providerID)
+    }
+
+    func extractLatestResponse(from providerID: ProviderID) async throws -> String {
+        let webView = try requiredWebView(for: providerID)
+        let adapter = try requiredAdapter(for: providerID)
+        let probe = try await completionProbe(providerID: providerID, webView: webView, adapter: adapter)
+        guard !probe.text.isEmpty else {
+            throw CouncilProviderClientError.extractionFailed(providerID)
+        }
+        return probe.text
+    }
+
+    func startNewConversation(for providerID: ProviderID) async throws {
+        guard let webView = webViews[providerID],
+              let definition = providerURL(for: providerID),
+              webView.load(URLRequest(url: definition.newChatURL)) != nil
+        else {
+            throw CouncilProviderClientError.webViewUnavailable(providerID)
+        }
+        try await waitUntilReady(providerID, timeout: 30, requireNavigationCycle: true)
+    }
+
+    func isAuthenticated(_ providerID: ProviderID) async -> Bool {
+        guard let webView = webViews[providerID], let adapter = adapters[providerID] else { return false }
+        do {
+            let value = try await evaluate(adapter.makeAuthenticationProbeScript(), in: webView)
+            return (value as? [String: Any])?["authenticated"] as? Bool ?? false
+        } catch {
+            return false
+        }
+    }
+
+    func recoverFromFailure(for providerID: ProviderID) async throws {
+        let webView = try requiredWebView(for: providerID)
+        let adapter = try requiredAdapter(for: providerID)
+        do {
+            _ = try await evaluate(adapter.makeRecoveryScript(), in: webView)
+            webView.reload()
+            try await waitUntilReady(providerID, timeout: 30, requireNavigationCycle: true)
+        } catch {
+            throw CouncilProviderClientError.recoveryFailed(providerID, error.localizedDescription)
+        }
+    }
+
+    private func waitUntilReady(
+        _ providerID: ProviderID,
+        timeout: TimeInterval,
+        requireNavigationCycle: Bool = false
+    ) async throws {
+        guard let webView = webViews[providerID] else {
+            throw CouncilProviderClientError.webViewUnavailable(providerID)
+        }
+        let deadline = Date().addingTimeInterval(timeout)
+        var observedNavigation = !requireNavigationCycle
+        while Date() < deadline {
+            try Task.checkCancellation()
+            if webView.isLoading || webView.estimatedProgress < 0.99 {
+                observedNavigation = true
+            }
+            if observedNavigation,
+               !webView.isLoading,
+               webView.estimatedProgress >= 0.99,
+               await isAuthenticated(providerID)
+            {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(500))
+        }
+        throw CouncilProviderClientError.unauthenticated(providerID)
+    }
+
+    private func completionProbe(
+        providerID: ProviderID,
+        webView: WKWebView,
+        adapter: any ProviderAutomationAdapter
+    ) async throws -> ProviderCompletionProbe {
+        let value = try await evaluate(adapter.makeCompletionProbeScript(), in: webView)
+        guard let dictionary = value as? [String: Any] else {
+            throw CouncilProviderClientError.extractionFailed(providerID)
+        }
+        return ProviderCompletionProbe(
+            responseCount: dictionary["responseCount"] as? Int ?? 0,
+            text: dictionary["text"] as? String ?? "",
+            isStreaming: dictionary["isStreaming"] as? Bool ?? false,
+            rateLimited: dictionary["rateLimited"] as? Bool ?? false,
+            rateLimitMessage: dictionary["rateLimitMessage"] as? String ?? ""
+        )
+    }
+
+    private func requiredWebView(for providerID: ProviderID) throws -> WKWebView {
+        guard let webView = webViews[providerID] else {
+            throw CouncilProviderClientError.webViewUnavailable(providerID)
+        }
+        return webView
+    }
+
+    private func requiredAdapter(for providerID: ProviderID) throws -> any ProviderAutomationAdapter {
+        guard let adapter = adapters[providerID] else {
+            throw CouncilProviderClientError.adapterUnavailable(providerID)
+        }
+        return adapter
+    }
+
+    private func evaluate(_ script: String, in webView: WKWebView) async throws -> Any? {
+        try await withCheckedThrowingContinuation { continuation in
+            webView.evaluateJavaScript(script) { value, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: value)
+                }
+            }
         }
     }
 
@@ -219,6 +399,14 @@ final class WebViewHub: ObservableObject {
             webView.pageZoom = zoom
         }
     }
+}
+
+private struct ProviderCompletionProbe {
+    let responseCount: Int
+    let text: String
+    let isStreaming: Bool
+    let rateLimited: Bool
+    let rateLimitMessage: String
 }
 
 struct WebViewPane: NSViewRepresentable {

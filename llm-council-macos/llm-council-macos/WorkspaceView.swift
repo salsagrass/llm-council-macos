@@ -15,10 +15,15 @@ struct WorkspaceView: View {
 
     @StateObject private var webViewHub = WebViewHub()
     @StateObject private var captureContext = CouncilCaptureContext()
+    @StateObject private var councilCoordinator = CouncilCoordinator()
     @State private var splitLayoutResetKey = 0
     @State private var paneWindowStart = 0
     @State private var pendingDispatchTask: Task<Void, Never>?
+    @State private var pendingCouncilStartTask: Task<Void, Never>?
     @State private var composerFocused = false
+    @State private var councilProviderIDs: Set<ProviderID> = [.chatGPT, .claude, .gemini]
+    @State private var freshChatIsolation = true
+    @State private var councilStartError: String?
 
     private let maxComparePanes = 3
     private let composerDockMinHeight: CGFloat = 132
@@ -54,7 +59,7 @@ struct WorkspaceView: View {
     private var workspaceRoot: some View {
         configuredWorkspaceSurface
             .onReceive(NotificationCenter.default.publisher(for: .councilSendPrompt)) { _ in
-                sendToActiveProviders()
+                performPrimaryAction()
             }
             .onReceive(NotificationCenter.default.publisher(for: .councilNewChatAll)) { _ in
                 startNewChats()
@@ -92,16 +97,20 @@ struct WorkspaceView: View {
             }
             .onAppear {
                 normalizePaneWindow()
+                webViewHub.configure(adapters: adapters)
                 webViewHub.setGlobalZoom(store.pageZoom)
             }
             .onDisappear {
                 pendingDispatchTask?.cancel()
+                pendingCouncilStartTask?.cancel()
             }
     }
 
     private var configuredWorkspaceSurface: AnyView {
         AnyView(
             VStack(spacing: 0) {
+                workspaceModeBar
+
                 workspaceBackground
                     .overlay {
                         captureAnchor
@@ -121,7 +130,62 @@ struct WorkspaceView: View {
             Color(nsColor: .windowBackgroundColor)
 
             workspaceCanvas
+                .opacity(chrome.councilMode == .compare ? 1 : 0.001)
+                .allowsHitTesting(chrome.councilMode == .compare)
+
+            if chrome.councilMode.isCouncil {
+                CouncilRunView(
+                    coordinator: councilCoordinator,
+                    mode: chrome.councilMode,
+                    selectedProviderIDs: $councilProviderIDs,
+                    freshChatIsolation: $freshChatIsolation,
+                    startErrorMessage: councilStartError,
+                    onRetry: { turnID in
+                        councilCoordinator.retry(turnID: turnID, client: webViewHub)
+                    }
+                )
+            }
         }
+    }
+
+    private var workspaceModeBar: some View {
+        HStack(spacing: CouncilSpacing.md) {
+            Text("Mode")
+                .font(CouncilTypography.detailStrong)
+
+            Picker(
+                "Mode",
+                selection: Binding(
+                    get: { chrome.councilMode },
+                    set: { newMode in
+                        guard !councilCoordinator.isRunning else { return }
+                        chrome.councilMode = newMode
+                        councilStartError = nil
+                    }
+                )
+            ) {
+                ForEach(CouncilMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .disabled(councilCoordinator.isRunning)
+            .frame(maxWidth: 560)
+
+            Spacer()
+
+            if chrome.councilMode.isCouncil {
+                Text(councilCoordinator.activeRun?.stage.title ?? "Ready for a new council run")
+                    .font(CouncilTypography.meta)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, CouncilSpacing.xl)
+        .padding(.vertical, CouncilSpacing.sm)
+        .background(.regularMaterial)
+        .overlay(alignment: .bottom) { Divider() }
     }
 
     private var captureAnchor: some View {
@@ -259,7 +323,7 @@ struct WorkspaceView: View {
     private var composerDock: some View {
         VStack(alignment: .leading, spacing: CouncilSpacing.md) {
             HStack(alignment: .firstTextBaseline, spacing: CouncilSpacing.md) {
-                Text("Prompt")
+                Text(chrome.councilMode == .compare ? "Prompt" : "Council Question")
                     .font(CouncilTypography.promptLabel)
                     .foregroundStyle(.secondary)
 
@@ -267,7 +331,7 @@ struct WorkspaceView: View {
 
                 Spacer()
 
-                Text(store.dispatchState.message)
+                Text(composerStatusMessage)
                     .font(CouncilTypography.promptStatus)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -281,13 +345,13 @@ struct WorkspaceView: View {
             HStack(alignment: .top, spacing: CouncilSpacing.md) {
                 ZStack(alignment: .topLeading) {
                     CouncilComposerTextView(text: $store.composerText, isFocused: $composerFocused) {
-                        sendToActiveProviders()
+                        performPrimaryAction()
                     }
                     .font(CouncilTypography.promptInput)
                     .frame(maxWidth: .infinity, minHeight: CouncilMetrics.textFieldMinHeight)
 
                     if store.composerText.isEmpty {
-                        Text("Write once, compare across providers")
+                        Text(chrome.councilMode == .compare ? "Write once, compare across providers" : "Ask the council one question")
                             .font(CouncilTypography.promptInput)
                             .foregroundStyle(.secondary)
                             .padding(.top, 6)
@@ -307,14 +371,22 @@ struct WorkspaceView: View {
                         .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
                 )
 
-                if store.dispatchState.isActive {
+                if chrome.councilMode.isCouncil, councilCoordinator.isRunning {
+                    Button("Stop") {
+                        councilCoordinator.stopNow()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(CouncilControls.standard)
+                    .accessibilityIdentifier("council-stop-button")
+                } else if store.dispatchState.isActive {
                     Button("Cancel") {
                         cancelCurrentDispatch()
                     }
                     .buttonStyle(.bordered)
                     .controlSize(CouncilControls.standard)
                     .accessibilityIdentifier("composer-cancel-button")
-                } else if let lastPrompt = store.dispatchState.lastPrompt,
+                } else if chrome.councilMode == .compare,
+                          let lastPrompt = store.dispatchState.lastPrompt,
                           !lastPrompt.isEmpty
                 {
                     Button("Resend") {
@@ -327,13 +399,13 @@ struct WorkspaceView: View {
                 }
 
                 Button {
-                    sendToActiveProviders()
+                    performPrimaryAction()
                 } label: {
-                    Label(store.dispatchState.isActive ? "Sending" : "Send", systemImage: "paperplane.fill")
+                    Label(primaryButtonTitle, systemImage: chrome.councilMode == .compare ? "paperplane.fill" : "person.3.sequence.fill")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(CouncilControls.standard)
-                .disabled(WorkspaceStore.normalizedPrompt(store.composerText).isEmpty || store.dispatchState.isActive)
+                .disabled(primaryActionDisabled)
                 .keyboardShortcut(.return, modifiers: [.command])
                 .accessibilityIdentifier("send-all-button")
             }
@@ -353,16 +425,49 @@ struct WorkspaceView: View {
     }
 
     private var composerTargetLine: String {
-        if store.dispatchProviderIDs.isEmpty {
+        if currentTargetProviderIDs.isEmpty {
             return "No provider targets selected"
         }
-        return "Send to \(store.dispatchProviderIDs.count) provider\(store.dispatchProviderIDs.count == 1 ? "" : "s")"
+        return "Send to \(currentTargetProviderIDs.count) provider\(currentTargetProviderIDs.count == 1 ? "" : "s")"
+    }
+
+    private var currentTargetProviderIDs: [ProviderID] {
+        if chrome.councilMode.isCouncil {
+            return [ProviderID.chatGPT, .claude, .gemini].filter { councilProviderIDs.contains($0) }
+        }
+        return store.dispatchProviderIDs
+    }
+
+    private var composerStatusMessage: String {
+        if chrome.councilMode.isCouncil {
+            if let error = councilStartError { return error }
+            return councilCoordinator.activeRun?.stage.title ?? "Ready"
+        }
+        return store.dispatchState.message
+    }
+
+    private var primaryButtonTitle: String {
+        if chrome.councilMode.isCouncil {
+            return councilCoordinator.isRunning ? "Running" : "Start Council"
+        }
+        return store.dispatchState.isActive ? "Sending" : "Send"
+    }
+
+    private var primaryActionDisabled: Bool {
+        let questionIsEmpty = WorkspaceStore.normalizedPrompt(store.composerText).isEmpty
+        if chrome.councilMode.isCouncil {
+            return questionIsEmpty
+                || councilCoordinator.isRunning
+                || currentTargetProviderIDs.count < 2
+                || !currentTargetProviderIDs.contains(.chatGPT)
+        }
+        return questionIsEmpty || store.dispatchState.isActive
     }
 
     private var compactTargetChipRow: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: CouncilSpacing.xs) {
-                ForEach(store.dispatchProviderIDs.prefix(3), id: \.self) { providerID in
+                ForEach(currentTargetProviderIDs.prefix(3), id: \.self) { providerID in
                     if let provider = store.definition(for: providerID) {
                         Text(provider.displayName)
                             .font(CouncilTypography.compactPill)
@@ -375,8 +480,8 @@ struct WorkspaceView: View {
                     }
                 }
 
-                if store.dispatchProviderIDs.count > 3 {
-                    Text("+\(store.dispatchProviderIDs.count - 3)")
+                if currentTargetProviderIDs.count > 3 {
+                    Text("+\(currentTargetProviderIDs.count - 3)")
                         .font(CouncilTypography.compactPill)
                         .foregroundStyle(.secondary)
                 }
@@ -388,6 +493,62 @@ struct WorkspaceView: View {
         chrome.activateProvider(providerID)
         chrome.selectProvider(providerID)
         resetSplitLayout()
+    }
+
+    private func performPrimaryAction() {
+        if chrome.councilMode.isCouncil {
+            startCouncilRun()
+        } else {
+            sendToActiveProviders()
+        }
+    }
+
+    private func startCouncilRun() {
+        guard !councilCoordinator.isRunning else { return }
+        pendingCouncilStartTask?.cancel()
+        let question = WorkspaceStore.normalizedPrompt(store.composerText)
+        let participants = currentTargetProviderIDs
+        guard !question.isEmpty else {
+            councilStartError = CouncilRunValidationError.emptyQuestion.localizedDescription
+            return
+        }
+        guard participants.count >= 2, participants.contains(.chatGPT) else {
+            councilStartError = CouncilRunValidationError.atLeastTwoProvidersRequired.localizedDescription
+            return
+        }
+
+        councilStartError = nil
+        webViewHub.configure(adapters: adapters)
+        for providerID in participants {
+            if !store.state(for: providerID).isVisible {
+                store.setPaneVisibility(providerID, isVisible: true)
+            }
+        }
+        chrome.activateProviders(participants)
+        normalizePaneWindow()
+        resetSplitLayout()
+
+        pendingCouncilStartTask = Task { @MainActor in
+            let mounted = await webViewHub.waitForMountedProviders(participants, timeout: 5)
+            guard !Task.isCancelled else { return }
+            guard mounted else {
+                councilStartError = "Unable to mount every selected provider WebView. Switch to Compare and open each provider once."
+                return
+            }
+
+            do {
+                try councilCoordinator.start(
+                    question: question,
+                    mode: chrome.councilMode,
+                    participantProviderIDs: participants,
+                    freshChatIsolation: freshChatIsolation,
+                    client: webViewHub
+                )
+                _ = store.registerPromptSend()
+            } catch {
+                councilStartError = error.localizedDescription
+            }
+        }
     }
 
     private func sendToActiveProviders() {

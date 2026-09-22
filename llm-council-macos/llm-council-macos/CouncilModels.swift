@@ -389,9 +389,10 @@ protocol WorkspacePersisting {
 
 protocol ProviderAutomationAdapter {
     var providerID: ProviderID { get }
-    var inputSelectors: [String] { get }
-    var sendButtonSelectors: [String] { get }
-    func makeSendScript(prompt: String) -> String
+    func makeSubmitScript(message: String) -> String
+    func makeCompletionProbeScript() -> String
+    func makeAuthenticationProbeScript() -> String
+    func makeRecoveryScript() -> String
 }
 
 struct WebAutomationResult {

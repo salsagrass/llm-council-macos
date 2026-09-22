@@ -22,6 +22,7 @@ final class WorkspaceChromeState: ObservableObject {
     @Published var sidebarSelection: WorkspaceSidebarSelection? = .workspace
     @Published var selectedProviderID: ProviderID?
     @Published var inspectorPresented = true
+    @Published var councilMode: CouncilMode = .compare
     @Published private(set) var activatedProviderIDs: Set<ProviderID> = []
 
     func selectWorkspace() {
