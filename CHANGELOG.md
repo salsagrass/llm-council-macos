@@ -22,3 +22,4 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 - The shared prompt composer now accepts click focus and keyboard input reliably; `Command-Return` submits while plain Return inserts a new line.
 - Provider submissions now await asynchronous JavaScript results through WebKit's async bridge instead of failing when an unresolved Promise crosses into Swift.
+- Fresh council runs now verify blank provider conversations, track response DOM identity and fingerprints, select responses in DOM order, and stop when a prerequisite round lacks usable results.

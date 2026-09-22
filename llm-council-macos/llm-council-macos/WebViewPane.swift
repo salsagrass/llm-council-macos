@@ -240,7 +240,9 @@ final class WebViewHub: ObservableObject, CouncilProviderClient {
 
         guard let dictionary = value as? [String: Any],
               let ok = dictionary["ok"] as? Bool,
-              ok
+              ok,
+              let submissionToken = dictionary["submissionToken"] as? String,
+              !submissionToken.isEmpty
         else {
             let message = (value as? [String: Any])?["error"] as? String ?? "send-not-confirmed"
             throw CouncilProviderClientError.submissionFailed(providerID, message)
@@ -250,6 +252,8 @@ final class WebViewHub: ObservableObject, CouncilProviderClient {
             providerID: providerID,
             baselineResponseCount: baseline.responseCount,
             baselineResponseText: baseline.text,
+            baselineResponseFingerprints: baseline.responseFingerprints,
+            submissionToken: submissionToken,
             submittedAt: .now
         )
     }
@@ -279,8 +283,9 @@ final class WebViewHub: ObservableObject, CouncilProviderClient {
                 )
             }
 
-            let isNewResponse = probe.responseCount > receipt.baselineResponseCount
-                || (!probe.text.isEmpty && probe.text != receipt.baselineResponseText)
+            let isNewResponse = !probe.latestFingerprint.isEmpty
+                && probe.latestBaselineToken != receipt.submissionToken
+                && !receipt.baselineResponseFingerprints.contains(probe.latestFingerprint)
             if isNewResponse, !probe.isStreaming, !probe.text.isEmpty {
                 if probe.text == lastCandidate {
                     stableProbeCount += 1
@@ -319,6 +324,12 @@ final class WebViewHub: ObservableObject, CouncilProviderClient {
             throw CouncilProviderClientError.webViewUnavailable(providerID)
         }
         try await waitUntilReady(providerID, timeout: 30, requireNavigationCycle: true)
+
+        let adapter = try requiredAdapter(for: providerID)
+        let probe = try await completionProbe(providerID: providerID, webView: webView, adapter: adapter)
+        guard probe.responseCount == 0 else {
+            throw CouncilProviderClientError.freshConversationNotEmpty(providerID, probe.responseCount)
+        }
     }
 
     func isAuthenticated(_ providerID: ProviderID) async -> Bool {
@@ -381,6 +392,9 @@ final class WebViewHub: ObservableObject, CouncilProviderClient {
         }
         return ProviderCompletionProbe(
             responseCount: dictionary["responseCount"] as? Int ?? 0,
+            responseFingerprints: Set(dictionary["responseFingerprints"] as? [String] ?? []),
+            latestFingerprint: dictionary["latestFingerprint"] as? String ?? "",
+            latestBaselineToken: dictionary["latestBaselineToken"] as? String ?? "",
             text: dictionary["text"] as? String ?? "",
             isStreaming: dictionary["isStreaming"] as? Bool ?? false,
             rateLimited: dictionary["rateLimited"] as? Bool ?? false,
@@ -416,6 +430,9 @@ final class WebViewHub: ObservableObject, CouncilProviderClient {
 
 private struct ProviderCompletionProbe {
     let responseCount: Int
+    let responseFingerprints: Set<String>
+    let latestFingerprint: String
+    let latestBaselineToken: String
     let text: String
     let isStreaming: Bool
     let rateLimited: Bool

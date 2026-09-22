@@ -140,6 +140,57 @@ struct CouncilProtocolTests {
         #expect(client.recoveredProviders.contains(.claude))
         #expect(persistence.savedRuns.first?.turns.first { $0.id == failed.id }?.status == .succeeded)
     }
+
+    @MainActor
+    @Test("A failed prerequisite round stops instead of cascading stale prompts")
+    func failedRoundDoesNotCascade() async throws {
+        let persistence = MemoryCouncilRunPersistence()
+        let client = FakeCouncilProviderClient()
+        client.round1FailureBudget = [.chatGPT: 1, .claude: 1, .gemini: 1]
+        let coordinator = CouncilCoordinator(persistence: persistence)
+
+        try coordinator.start(
+            question: "Do not cascade",
+            mode: .thoroughCouncil,
+            participantProviderIDs: [.chatGPT, .claude, .gemini],
+            freshChatIsolation: false,
+            client: client
+        )
+        await coordinator.waitForCurrentRun()
+
+        let run = try #require(coordinator.activeRun)
+        #expect(run.stage == .failed)
+        #expect(run.turns.filter { $0.stage == .independentResponses }.count == 3)
+        #expect(run.turns.contains { $0.stage == .blindPeerReview } == false)
+        #expect(run.turns.contains { $0.stage == .finalPositions } == false)
+        #expect(run.turns.contains { $0.stage == .chairmanSynthesis } == false)
+        #expect(run.logs.last?.event == .runFailed)
+    }
+
+    @MainActor
+    @Test("Fresh-chat preparation rejects provider pages that still contain responses")
+    func dirtyFreshConversationStopsBeforeRoundOne() async throws {
+        let persistence = MemoryCouncilRunPersistence()
+        let client = FakeCouncilProviderClient()
+        client.newConversationFailures[.gemini] = .freshConversationNotEmpty(.gemini, 1)
+        let coordinator = CouncilCoordinator(persistence: persistence)
+
+        try coordinator.start(
+            question: "Do not reuse old responses",
+            mode: .council,
+            participantProviderIDs: [.chatGPT, .claude, .gemini],
+            freshChatIsolation: true,
+            client: client
+        )
+        await coordinator.waitForCurrentRun()
+
+        let run = try #require(coordinator.activeRun)
+        #expect(run.stage == .failed)
+        #expect(run.turns.filter { $0.stage == .preparing }.count == 3)
+        #expect(run.turns.first { $0.providerID == .gemini }?.status == .failed)
+        #expect(run.turns.contains { $0.stage == .independentResponses } == false)
+        #expect(run.logs.last?.event == .runFailed)
+    }
 }
 
 private final class MemoryCouncilRunPersistence: CouncilRunPersisting, @unchecked Sendable {
@@ -159,6 +210,7 @@ private final class FakeCouncilProviderClient: CouncilProviderClient {
     var startedNewConversations: [ProviderID] = []
     var recoveredProviders: [ProviderID] = []
     var round1FailureBudget: [ProviderID: Int] = [:]
+    var newConversationFailures: [ProviderID: CouncilProviderClientError] = [:]
 
     private var nextReceiptID = 0
     private var responsesByReceiptID: [Int: String] = [:]
@@ -183,6 +235,8 @@ private final class FakeCouncilProviderClient: CouncilProviderClient {
             providerID: providerID,
             baselineResponseCount: nextReceiptID,
             baselineResponseText: "",
+            baselineResponseFingerprints: [],
+            submissionToken: "fixture-\(nextReceiptID)",
             submittedAt: .now
         )
     }
@@ -205,6 +259,9 @@ private final class FakeCouncilProviderClient: CouncilProviderClient {
     }
 
     func startNewConversation(for providerID: ProviderID) async throws {
+        if let failure = newConversationFailures[providerID] {
+            throw failure
+        }
         startedNewConversations.append(providerID)
     }
 

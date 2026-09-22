@@ -55,6 +55,37 @@ struct LLM_CouncilTests {
     }
 
     @MainActor
+    @Test("Completion probe selects the newest response content in DOM order")
+    func completionProbeRejectsWrapperLabelsAndStaleContent() async throws {
+        let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        let navigationWaiter = WebViewNavigationWaiter()
+        try await navigationWaiter.load(
+            """
+            <html><body>
+              <model-response id="old-response">
+                <div class="model-response-text">Old answer from another turn</div>
+              </model-response>
+              <model-response id="current-response">
+                <span>Gemini said</span>
+                <div class="model-response-text">Current answer only</div>
+              </model-response>
+            </body></html>
+            """,
+            in: webView
+        )
+        let adapter = try #require(ProviderAdapterRegistry.adapter(for: .gemini))
+        let value = try await WebJavaScriptBridge.evaluate(
+            adapter.makeCompletionProbeScript(),
+            in: webView
+        )
+        let result = try #require(value as? [String: Any])
+
+        #expect(result["text"] as? String == "Current answer only")
+        #expect((result["latestFingerprint"] as? String)?.isEmpty == false)
+        #expect((result["responseFingerprints"] as? [String])?.isEmpty == false)
+    }
+
+    @MainActor
     @Test("Built-in provider registry is stable")
     func builtInProviderRegistryContainsExpectedSix() {
         let ids = Set(BuiltInProviders.definitions.map(\.id))

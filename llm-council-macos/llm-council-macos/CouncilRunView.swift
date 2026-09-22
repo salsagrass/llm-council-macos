@@ -342,6 +342,7 @@ struct CouncilRunView: View {
     private func stageColor(_ stage: CouncilStage) -> Color {
         switch stage {
         case .completed: .green
+        case .failed: .red
         case .stopped: .orange
         default: .secondary
         }

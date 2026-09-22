@@ -123,6 +123,11 @@ final class CouncilCoordinator: ObservableObject {
             return
         }
 
+        if let failure = blockingFailure(after: .preparing) {
+            failActiveRun(after: .preparing, message: failure)
+            return
+        }
+
         if activeRun?.stopAfterCurrentStage == true {
             mutateActiveRun { run in
                 run.stage = .stopped
@@ -155,6 +160,11 @@ final class CouncilCoordinator: ObservableObject {
             await execute(stage: stage, client: client)
             guard !Task.isCancelled else {
                 finishCancelledRunIfNeeded()
+                return
+            }
+
+            if let failure = blockingFailure(after: stage) {
+                failActiveRun(after: stage, message: failure)
                 return
             }
 
@@ -541,6 +551,53 @@ final class CouncilCoordinator: ObservableObject {
             providerID: providerID,
             message: error.localizedDescription
         )
+    }
+
+    private func blockingFailure(after stage: CouncilStage) -> String? {
+        guard let run = activeRun else { return "The active council run is unavailable." }
+        let successful = run.successfulResponses(for: stage)
+
+        switch stage {
+        case .preparing:
+            guard successful.count == run.participantProviderIDs.count else {
+                return "Council stopped because not every selected provider opened a verified fresh, authenticated conversation."
+            }
+        case .independentResponses:
+            guard successful.count >= 2 else {
+                return "Council stopped because fewer than two independent responses were captured."
+            }
+        case .blindPeerReview:
+            guard !successful.isEmpty else {
+                return "Council stopped because no blind peer review was captured."
+            }
+        case .finalPositions:
+            guard successful.count >= 2 else {
+                return "Council stopped because fewer than two final positions were captured."
+            }
+        case .chairmanSynthesis:
+            guard successful[.chatGPT] != nil else {
+                return "Council stopped because the ChatGPT Chairman synthesis failed."
+            }
+        case .ratifyOrDissent:
+            guard !successful.isEmpty else {
+                return "Council stopped because neither ratification nor dissent was captured."
+            }
+        case .completed, .failed, .stopped:
+            break
+        }
+        return nil
+    }
+
+    private func failActiveRun(after stage: CouncilStage, message: String) {
+        mutateActiveRun { run in
+            run.stage = .failed
+            run.completedAt = .now
+            run.stopAfterCurrentStage = false
+            run.logs.append(CouncilLogEntry(event: .runFailed, stage: stage, message: message))
+        }
+        lastErrorMessage = message
+        isRunning = false
+        executionTask = nil
     }
 
     private func appendLog(

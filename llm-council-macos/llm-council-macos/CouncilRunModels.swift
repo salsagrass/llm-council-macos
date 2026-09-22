@@ -33,6 +33,7 @@ enum CouncilStage: String, CaseIterable, Codable, Hashable, Identifiable {
     case chairmanSynthesis
     case ratifyOrDissent
     case completed
+    case failed
     case stopped
 
     var id: String { rawValue }
@@ -46,11 +47,12 @@ enum CouncilStage: String, CaseIterable, Codable, Hashable, Identifiable {
         case .chairmanSynthesis: "Chairman Synthesis"
         case .ratifyOrDissent: "Ratify / Dissent"
         case .completed: "Completed"
+        case .failed: "Failed"
         case .stopped: "Stopped"
         }
     }
 
-    var isTerminal: Bool { self == .completed || self == .stopped }
+    var isTerminal: Bool { self == .completed || self == .failed || self == .stopped }
 }
 
 enum CouncilTurnStatus: String, Codable, Hashable {
@@ -119,6 +121,7 @@ enum CouncilLogEvent: String, Codable, Hashable {
     case timedOut
     case retryStarted
     case stageCompleted
+    case runFailed
     case runStopped
     case runCompleted
 }
@@ -302,6 +305,8 @@ struct ProviderSubmissionReceipt: Sendable, Hashable {
     let providerID: ProviderID
     let baselineResponseCount: Int
     let baselineResponseText: String
+    let baselineResponseFingerprints: Set<String>
+    let submissionToken: String
     let submittedAt: Date
 }
 
@@ -313,6 +318,7 @@ enum CouncilProviderClientError: LocalizedError, Equatable {
     case extractionFailed(ProviderID)
     case rateLimited(ProviderID, String)
     case timedOut(ProviderID)
+    case freshConversationNotEmpty(ProviderID, Int)
     case recoveryFailed(ProviderID, String)
 
     var errorDescription: String? {
@@ -324,6 +330,8 @@ enum CouncilProviderClientError: LocalizedError, Equatable {
         case let .extractionFailed(provider): "Could not extract the latest \(provider.rawValue) response."
         case let .rateLimited(provider, message): "\(provider.rawValue) reported a usage limit: \(message)"
         case let .timedOut(provider): "Timed out waiting for \(provider.rawValue)."
+        case let .freshConversationNotEmpty(provider, count):
+            "\(provider.rawValue) did not open a fresh conversation (found \(count) existing response elements)."
         case let .recoveryFailed(provider, message): "\(provider.rawValue) recovery failed: \(message)"
         }
     }

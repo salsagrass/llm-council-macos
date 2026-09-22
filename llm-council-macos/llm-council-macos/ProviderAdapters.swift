@@ -22,7 +22,8 @@ struct SelectorBasedProviderAdapter: ProviderAutomationAdapter {
         ProviderJavaScript.makeSubmitScript(
             message: message,
             inputSelectors: configuration.inputSelectors,
-            sendButtonSelectors: configuration.sendButtonSelectors
+            sendButtonSelectors: configuration.sendButtonSelectors,
+            responseSelectors: configuration.responseSelectors
         )
     }
 
@@ -242,17 +243,20 @@ private enum ProviderJavaScript {
     static func makeSubmitScript(
         message: String,
         inputSelectors: [String],
-        sendButtonSelectors: [String]
+        sendButtonSelectors: [String],
+        responseSelectors: [String]
     ) -> String {
         let messageLiteral = jsonLiteral(message)
         let inputSelectorsLiteral = jsonLiteral(inputSelectors)
         let sendButtonSelectorsLiteral = jsonLiteral(sendButtonSelectors)
+        let responseSelectorsLiteral = jsonLiteral(responseSelectors)
 
         return """
         (async function() {
           const message = \(messageLiteral);
           const inputSelectors = \(inputSelectorsLiteral);
           const sendSelectors = \(sendButtonSelectorsLiteral);
+          const responseSelectors = \(responseSelectorsLiteral);
           const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
           const visible = (node) => !!node && node.getClientRects().length > 0;
 
@@ -311,6 +315,22 @@ private enum ProviderJavaScript {
 
           const input = findFirstVisible(inputSelectors);
           if (!input) return { ok: false, error: "input-not-found" };
+
+          const submissionToken = `llm-council-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+          try {
+            for (const node of document.querySelectorAll(responseSelectors.join(","))) {
+              node.dataset.llmCouncilBaseline = submissionToken;
+            }
+          } catch (error) {
+            for (const selector of responseSelectors) {
+              try {
+                for (const node of document.querySelectorAll(selector)) {
+                  node.dataset.llmCouncilBaseline = submissionToken;
+                }
+              } catch (selectorError) {}
+            }
+          }
+
           input.click();
           input.focus();
           setPromptValue(input, message);
@@ -319,7 +339,7 @@ private enum ProviderJavaScript {
             const button = findSendButton();
             if (button) {
               button.click();
-              return { ok: true, method: "button" };
+              return { ok: true, method: "button", submissionToken };
             }
             await sleep(60);
           }
@@ -327,7 +347,7 @@ private enum ProviderJavaScript {
           const form = input.closest("form");
           if (form && typeof form.requestSubmit === "function") {
             form.requestSubmit();
-            return { ok: true, method: "form" };
+            return { ok: true, method: "form", submissionToken };
           }
 
           input.dispatchEvent(new KeyboardEvent("keydown", {
@@ -339,7 +359,7 @@ private enum ProviderJavaScript {
             bubbles: true, cancelable: true
           }));
           await sleep(100);
-          return { ok: false, error: "send-not-triggered" };
+          return { ok: false, error: "send-not-triggered", submissionToken };
         })();
         """
     }
@@ -355,22 +375,56 @@ private enum ProviderJavaScript {
           const streamingSelectors = \(jsonLiteral(streamingSelectors));
           const rateLimitPhrases = \(jsonLiteral(rateLimitPhrases));
           const visible = (node) => !!node && node.getClientRects().length > 0;
-          const nodes = [];
-          const seen = new Set();
+          const hashText = (value) => {
+            let hash = 2166136261;
+            for (let index = 0; index < value.length; index += 1) {
+              hash ^= value.charCodeAt(index);
+              hash = Math.imul(hash, 16777619);
+            }
+            return (hash >>> 0).toString(16);
+          };
 
-          for (const selector of responseSelectors) {
-            try {
-              for (const node of document.querySelectorAll(selector)) {
-                if (!seen.has(node) && visible(node)) {
-                  seen.add(node);
-                  nodes.push(node);
+          let nodes = [];
+          try {
+            nodes = Array.from(document.querySelectorAll(responseSelectors.join(",")));
+          } catch (error) {
+            const seen = new Set();
+            for (const selector of responseSelectors) {
+              try {
+                for (const node of document.querySelectorAll(selector)) {
+                  if (!seen.has(node)) {
+                    seen.add(node);
+                    nodes.push(node);
+                  }
                 }
-              }
-            } catch (error) {}
+              } catch (selectorError) {}
+            }
+            nodes.sort((left, right) => {
+              if (left === right) return 0;
+              return left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+            });
           }
 
-          const latest = nodes.length ? nodes[nodes.length - 1] : null;
-          const text = latest ? (latest.innerText || latest.textContent || "").trim() : "";
+          const responses = nodes.map((node, index) => {
+            const text = (node.innerText || node.textContent || "").trim();
+            const stableID = node.getAttribute("data-message-id")
+              || node.getAttribute("data-testid")
+              || node.getAttribute("data-id")
+              || node.id
+              || `${node.tagName.toLowerCase()}:${index}`;
+            return {
+              node,
+              text,
+              baselineToken: node.dataset.llmCouncilBaseline || "",
+              fingerprint: `${stableID}:${hashText(text)}`
+            };
+          });
+
+          const nonEmptyResponses = responses.filter((response) => response.text.length > 0);
+          const latest = nonEmptyResponses.length
+            ? nonEmptyResponses[nonEmptyResponses.length - 1]
+            : (responses.length ? responses[responses.length - 1] : null);
+          const text = latest ? latest.text : "";
           let isStreaming = false;
           for (const selector of streamingSelectors) {
             try {
@@ -382,15 +436,18 @@ private enum ProviderJavaScript {
           }
           if (latest) {
             isStreaming = isStreaming
-              || latest.getAttribute("data-is-streaming") === "true"
-              || latest.getAttribute("aria-busy") === "true";
+              || latest.node.getAttribute("data-is-streaming") === "true"
+              || latest.node.getAttribute("aria-busy") === "true";
           }
 
           const bodyText = (document.body?.innerText || "").toLowerCase();
           const matchedLimit = rateLimitPhrases.find((phrase) => bodyText.includes(phrase.toLowerCase())) || null;
           return {
             ok: true,
-            responseCount: nodes.length,
+            responseCount: responses.length,
+            responseFingerprints: responses.map((response) => response.fingerprint),
+            latestFingerprint: latest ? latest.fingerprint : "",
+            latestBaselineToken: latest ? latest.baselineToken : "",
             text,
             isStreaming,
             rateLimited: !!matchedLimit,
