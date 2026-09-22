@@ -12,6 +12,25 @@ private struct ProviderDOMConfiguration {
     let streamingSelectors: [String]
     let loginSelectors: [String]
     let rateLimitPhrases: [String]
+    let submittedPromptSelectors: [String]
+
+    init(
+        inputSelectors: [String],
+        sendButtonSelectors: [String],
+        responseSelectors: [String],
+        streamingSelectors: [String],
+        loginSelectors: [String],
+        rateLimitPhrases: [String],
+        submittedPromptSelectors: [String] = []
+    ) {
+        self.inputSelectors = inputSelectors
+        self.sendButtonSelectors = sendButtonSelectors
+        self.responseSelectors = responseSelectors
+        self.streamingSelectors = streamingSelectors
+        self.loginSelectors = loginSelectors
+        self.rateLimitPhrases = rateLimitPhrases
+        self.submittedPromptSelectors = submittedPromptSelectors
+    }
 }
 
 struct SelectorBasedProviderAdapter: ProviderAutomationAdapter {
@@ -23,7 +42,8 @@ struct SelectorBasedProviderAdapter: ProviderAutomationAdapter {
             message: message,
             inputSelectors: configuration.inputSelectors,
             sendButtonSelectors: configuration.sendButtonSelectors,
-            responseSelectors: configuration.responseSelectors
+            responseSelectors: configuration.responseSelectors,
+            submittedPromptSelectors: configuration.submittedPromptSelectors
         )
     }
 
@@ -31,7 +51,8 @@ struct SelectorBasedProviderAdapter: ProviderAutomationAdapter {
         ProviderJavaScript.makeCompletionProbeScript(
             responseSelectors: configuration.responseSelectors,
             streamingSelectors: configuration.streamingSelectors,
-            rateLimitPhrases: configuration.rateLimitPhrases
+            rateLimitPhrases: configuration.rateLimitPhrases,
+            submittedPromptSelectors: configuration.submittedPromptSelectors
         )
     }
 
@@ -83,6 +104,9 @@ enum ProviderAdapterRegistry {
                     "you have reached your limit",
                     "usage limit",
                     "too many requests",
+                ],
+                submittedPromptSelectors: [
+                    "[data-message-author-role='user']",
                 ]
             )
         ),
@@ -244,12 +268,14 @@ private enum ProviderJavaScript {
         message: String,
         inputSelectors: [String],
         sendButtonSelectors: [String],
-        responseSelectors: [String]
+        responseSelectors: [String],
+        submittedPromptSelectors: [String]
     ) -> String {
         let messageLiteral = jsonLiteral(message)
         let inputSelectorsLiteral = jsonLiteral(inputSelectors)
         let sendButtonSelectorsLiteral = jsonLiteral(sendButtonSelectors)
         let responseSelectorsLiteral = jsonLiteral(responseSelectors)
+        let submittedPromptSelectorsLiteral = jsonLiteral(submittedPromptSelectors)
 
         return """
         (async function() {
@@ -257,8 +283,13 @@ private enum ProviderJavaScript {
           const inputSelectors = \(inputSelectorsLiteral);
           const sendSelectors = \(sendButtonSelectorsLiteral);
           const responseSelectors = \(responseSelectorsLiteral);
+          const submittedPromptSelectors = \(submittedPromptSelectorsLiteral);
           const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
           const visible = (node) => !!node && node.getClientRects().length > 0;
+          const normalizeText = (value) => String(value || "")
+            .replace(/\\u00a0/g, " ")
+            .replace(/\\s+/g, " ")
+            .trim();
 
           const findFirstVisible = (selectors) => {
             for (const selector of selectors) {
@@ -284,6 +315,11 @@ private enum ProviderJavaScript {
             return null;
           };
 
+          const promptValue = (input) => {
+            const isTextInput = input.tagName === "TEXTAREA" || input.tagName === "INPUT";
+            return isTextInput ? input.value : (input.innerText || input.textContent || "");
+          };
+
           const setPromptValue = (input, value) => {
             const isTextInput = input.tagName === "TEXTAREA" || input.tagName === "INPUT";
             if (isTextInput) {
@@ -300,11 +336,21 @@ private enum ProviderJavaScript {
             input.focus();
             if (input.isContentEditable) {
               try {
-                document.execCommand("selectAll", false);
+                const range = document.createRange();
+                range.selectNodeContents(input);
+                const selection = window.getSelection();
+                selection.removeAllRanges();
+                selection.addRange(range);
                 document.execCommand("insertText", false, value);
               } catch (error) {}
-              if (!input.textContent || input.textContent.trim() !== String(value).trim()) {
-                input.textContent = value;
+              if (normalizeText(promptValue(input)) !== normalizeText(value)) {
+                input.replaceChildren();
+                for (const line of String(value).split("\\n")) {
+                  const paragraph = document.createElement("p");
+                  if (line.length) paragraph.textContent = line;
+                  else paragraph.appendChild(document.createElement("br"));
+                  input.appendChild(paragraph);
+                }
               }
               input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
               input.dispatchEvent(new Event("change", { bubbles: true }));
@@ -335,11 +381,68 @@ private enum ProviderJavaScript {
           input.focus();
           setPromptValue(input, message);
 
+          const expectedPrompt = normalizeText(message);
+          let stablePromptReads = 0;
+          for (let attempt = 0; attempt < 16; attempt += 1) {
+            await sleep(100);
+            if (normalizeText(promptValue(input)) === expectedPrompt) {
+              stablePromptReads += 1;
+              if (stablePromptReads >= 4) break;
+            } else {
+              stablePromptReads = 0;
+              setPromptValue(input, message);
+            }
+          }
+          if (stablePromptReads < 4) {
+            return { ok: false, error: "composer-prompt-mismatch", submissionToken };
+          }
+
+          const latestSubmittedPrompt = () => {
+            const nodes = [];
+            const seen = new Set();
+            for (const selector of submittedPromptSelectors) {
+              try {
+                for (const node of document.querySelectorAll(selector)) {
+                  if (!seen.has(node)) {
+                    seen.add(node);
+                    nodes.push(node);
+                  }
+                }
+              } catch (error) {}
+            }
+            nodes.sort((left, right) => {
+              if (left === right) return 0;
+              return left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+            });
+            const texts = nodes
+              .map((node) => (node.innerText || node.textContent || "").trim())
+              .filter((text) => text.length > 0);
+            return texts.length ? texts[texts.length - 1] : "";
+          };
+
+          const confirmSubmission = async (method) => {
+            if (!submittedPromptSelectors.length) {
+              return { ok: true, method, submissionToken, promptConfirmationRequired: false };
+            }
+            for (let attempt = 0; attempt < 50; attempt += 1) {
+              await sleep(100);
+              if (normalizeText(latestSubmittedPrompt()) === expectedPrompt) {
+                return { ok: true, method, submissionToken, promptConfirmationRequired: true };
+              }
+            }
+            return {
+              ok: false,
+              error: "submitted-prompt-mismatch",
+              submissionToken,
+              promptConfirmationRequired: true
+            };
+          };
+
           for (let attempt = 0; attempt < 30; attempt += 1) {
             const button = findSendButton();
             if (button) {
               button.click();
-              return { ok: true, method: "button", submissionToken };
+              return await confirmSubmission("button");
             }
             await sleep(60);
           }
@@ -347,7 +450,7 @@ private enum ProviderJavaScript {
           const form = input.closest("form");
           if (form && typeof form.requestSubmit === "function") {
             form.requestSubmit();
-            return { ok: true, method: "form", submissionToken };
+            return await confirmSubmission("form");
           }
 
           input.dispatchEvent(new KeyboardEvent("keydown", {
@@ -367,13 +470,15 @@ private enum ProviderJavaScript {
     static func makeCompletionProbeScript(
         responseSelectors: [String],
         streamingSelectors: [String],
-        rateLimitPhrases: [String]
+        rateLimitPhrases: [String],
+        submittedPromptSelectors: [String]
     ) -> String {
         """
         (function() {
           const responseSelectors = \(jsonLiteral(responseSelectors));
           const streamingSelectors = \(jsonLiteral(streamingSelectors));
           const rateLimitPhrases = \(jsonLiteral(rateLimitPhrases));
+          const submittedPromptSelectors = \(jsonLiteral(submittedPromptSelectors));
           const visible = (node) => !!node && node.getClientRects().length > 0;
           const hashText = (value) => {
             let hash = 2166136261;
@@ -384,12 +489,15 @@ private enum ProviderJavaScript {
             return (hash >>> 0).toString(16);
           };
 
-          let nodes = [];
-          try {
-            nodes = Array.from(document.querySelectorAll(responseSelectors.join(",")));
-          } catch (error) {
+          const collectNodes = (selectors) => {
+            let nodes = [];
+            try {
+              nodes = Array.from(document.querySelectorAll(selectors.join(",")));
+              return nodes;
+            } catch (error) {}
+
             const seen = new Set();
-            for (const selector of responseSelectors) {
+            for (const selector of selectors) {
               try {
                 for (const node of document.querySelectorAll(selector)) {
                   if (!seen.has(node)) {
@@ -403,7 +511,10 @@ private enum ProviderJavaScript {
               if (left === right) return 0;
               return left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
             });
-          }
+            return nodes;
+          };
+
+          const nodes = collectNodes(responseSelectors);
 
           const responses = nodes.map((node, index) => {
             const text = (node.innerText || node.textContent || "").trim();
@@ -425,6 +536,19 @@ private enum ProviderJavaScript {
             ? nonEmptyResponses[nonEmptyResponses.length - 1]
             : (responses.length ? responses[responses.length - 1] : null);
           const text = latest ? latest.text : "";
+          const submittedPrompts = collectNodes(submittedPromptSelectors)
+            .map((node) => ({
+              node,
+              text: (node.innerText || node.textContent || "").trim()
+            }))
+            .filter((value) => value.text.length > 0);
+          const latestSubmittedPrompt = submittedPrompts.length
+            ? submittedPrompts[submittedPrompts.length - 1]
+            : null;
+          const responseFollowsSubmittedPrompt = !submittedPromptSelectors.length
+            || (!!latest && !!latestSubmittedPrompt
+              && !!(latestSubmittedPrompt.node.compareDocumentPosition(latest.node)
+                & Node.DOCUMENT_POSITION_FOLLOWING));
           let isStreaming = false;
           for (const selector of streamingSelectors) {
             try {
@@ -448,6 +572,9 @@ private enum ProviderJavaScript {
             responseFingerprints: responses.map((response) => response.fingerprint),
             latestFingerprint: latest ? latest.fingerprint : "",
             latestBaselineToken: latest ? latest.baselineToken : "",
+            submittedPromptCount: submittedPrompts.length,
+            latestSubmittedPrompt: latestSubmittedPrompt ? latestSubmittedPrompt.text : "",
+            responseFollowsSubmittedPrompt,
             text,
             isStreaming,
             rateLimited: !!matchedLimit,

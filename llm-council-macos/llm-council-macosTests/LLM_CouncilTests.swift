@@ -55,6 +55,61 @@ struct LLM_CouncilTests {
     }
 
     @MainActor
+    @Test("ChatGPT submission waits for and confirms the current prompt")
+    func chatGPTSubmissionDoesNotReusePreviousComposerState() async throws {
+        let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        let navigationWaiter = WebViewNavigationWaiter()
+        try await navigationWaiter.load(
+            """
+            <html><head><style>
+              #prompt-textarea { min-height: 80px; }
+              button { width: 80px; height: 30px; }
+            </style></head><body>
+              <div id="prompt-textarea" contenteditable="true"><p>Previous council prompt</p></div>
+              <button data-testid="send-button">Send</button>
+              <div id="messages"></div>
+              <script>
+                const composer = document.getElementById("prompt-textarea");
+                let editorState = composer.innerText;
+                composer.addEventListener("input", () => {
+                  const nextValue = composer.innerText;
+                  setTimeout(() => { editorState = nextValue; }, 150);
+                });
+                document.querySelector("button").addEventListener("click", () => {
+                  const message = document.createElement("div");
+                  message.setAttribute("data-message-author-role", "user");
+                  message.textContent = editorState;
+                  document.getElementById("messages").appendChild(message);
+                });
+              </script>
+            </body></html>
+            """,
+            in: webView
+        )
+
+        let expectedPrompt = "Current council prompt\n\nwith a second paragraph"
+        let adapter = try #require(ProviderAdapterRegistry.adapter(for: .chatGPT))
+        let value = try await WebJavaScriptBridge.evaluate(
+            adapter.makeSubmitScript(message: expectedPrompt),
+            in: webView
+        )
+        let result = try #require(value as? [String: Any])
+        let submittedPrompt = try await WebJavaScriptBridge.evaluate(
+            """
+            (function() {
+              return document.querySelector("[data-message-author-role='user']")?.innerText || "";
+            })();
+            """,
+            in: webView
+        )
+
+        #expect(result["ok"] as? Bool == true)
+        #expect(result["promptConfirmationRequired"] as? Bool == true)
+        #expect((submittedPrompt as? String)?.contains("Current council prompt") == true)
+        #expect((submittedPrompt as? String)?.contains("Previous council prompt") == false)
+    }
+
+    @MainActor
     @Test("Completion probe selects the newest response content in DOM order")
     func completionProbeRejectsWrapperLabelsAndStaleContent() async throws {
         let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
@@ -83,6 +138,50 @@ struct LLM_CouncilTests {
         #expect(result["text"] as? String == "Current answer only")
         #expect((result["latestFingerprint"] as? String)?.isEmpty == false)
         #expect((result["responseFingerprints"] as? [String])?.isEmpty == false)
+    }
+
+    @MainActor
+    @Test("ChatGPT completion must follow the prompt from the current run")
+    func chatGPTCompletionIsOrderedAfterCurrentPrompt() async throws {
+        let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        let navigationWaiter = WebViewNavigationWaiter()
+        try await navigationWaiter.load(
+            """
+            <html><body>
+              <div data-message-author-role="user">Previous prompt</div>
+              <div data-message-author-role="assistant">Previous response</div>
+              <div data-message-author-role="user">Current prompt</div>
+            </body></html>
+            """,
+            in: webView
+        )
+        let adapter = try #require(ProviderAdapterRegistry.adapter(for: .chatGPT))
+        let beforeValue = try await WebJavaScriptBridge.evaluate(
+            adapter.makeCompletionProbeScript(),
+            in: webView
+        )
+        let before = try #require(beforeValue as? [String: Any])
+        #expect(before["responseFollowsSubmittedPrompt"] as? Bool == false)
+
+        _ = try await WebJavaScriptBridge.evaluate(
+            """
+            (function() {
+              const response = document.createElement("div");
+              response.setAttribute("data-message-author-role", "assistant");
+              response.textContent = "Current response";
+              document.body.appendChild(response);
+              return true;
+            })();
+            """,
+            in: webView
+        )
+        let afterValue = try await WebJavaScriptBridge.evaluate(
+            adapter.makeCompletionProbeScript(),
+            in: webView
+        )
+        let after = try #require(afterValue as? [String: Any])
+        #expect(after["responseFollowsSubmittedPrompt"] as? Bool == true)
+        #expect(after["text"] as? String == "Current response")
     }
 
     @MainActor

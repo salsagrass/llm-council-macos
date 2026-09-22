@@ -237,6 +237,8 @@ private final class FakeCouncilProviderClient: CouncilProviderClient {
             baselineResponseText: "",
             baselineResponseFingerprints: [],
             submissionToken: "fixture-\(nextReceiptID)",
+            expectedPromptText: message,
+            promptConfirmationRequired: false,
             submittedAt: .now
         )
     }

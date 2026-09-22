@@ -307,6 +307,8 @@ struct ProviderSubmissionReceipt: Sendable, Hashable {
     let baselineResponseText: String
     let baselineResponseFingerprints: Set<String>
     let submissionToken: String
+    let expectedPromptText: String
+    let promptConfirmationRequired: Bool
     let submittedAt: Date
 }
 
@@ -319,6 +321,7 @@ enum CouncilProviderClientError: LocalizedError, Equatable {
     case rateLimited(ProviderID, String)
     case timedOut(ProviderID)
     case freshConversationNotEmpty(ProviderID, Int)
+    case submittedPromptMismatch(ProviderID)
     case recoveryFailed(ProviderID, String)
 
     var errorDescription: String? {
@@ -331,7 +334,9 @@ enum CouncilProviderClientError: LocalizedError, Equatable {
         case let .rateLimited(provider, message): "\(provider.rawValue) reported a usage limit: \(message)"
         case let .timedOut(provider): "Timed out waiting for \(provider.rawValue)."
         case let .freshConversationNotEmpty(provider, count):
-            "\(provider.rawValue) did not open a fresh conversation (found \(count) existing response elements)."
+            "\(provider.rawValue) did not open a fresh conversation (found \(count) existing conversation messages)."
+        case let .submittedPromptMismatch(provider):
+            "\(provider.rawValue) did not submit the prompt for the current council run."
         case let .recoveryFailed(provider, message): "\(provider.rawValue) recovery failed: \(message)"
         }
     }

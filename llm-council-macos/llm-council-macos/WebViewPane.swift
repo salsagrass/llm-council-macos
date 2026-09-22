@@ -245,6 +245,9 @@ final class WebViewHub: ObservableObject, CouncilProviderClient {
               !submissionToken.isEmpty
         else {
             let message = (value as? [String: Any])?["error"] as? String ?? "send-not-confirmed"
+            if message == "composer-prompt-mismatch" || message == "submitted-prompt-mismatch" {
+                throw CouncilProviderClientError.submittedPromptMismatch(providerID)
+            }
             throw CouncilProviderClientError.submissionFailed(providerID, message)
         }
 
@@ -254,6 +257,8 @@ final class WebViewHub: ObservableObject, CouncilProviderClient {
             baselineResponseText: baseline.text,
             baselineResponseFingerprints: baseline.responseFingerprints,
             submissionToken: submissionToken,
+            expectedPromptText: message,
+            promptConfirmationRequired: dictionary["promptConfirmationRequired"] as? Bool ?? false,
             submittedAt: .now
         )
     }
@@ -283,10 +288,26 @@ final class WebViewHub: ObservableObject, CouncilProviderClient {
                 )
             }
 
+            let submittedPromptMatches = !receipt.promptConfirmationRequired
+                || normalizedPromptText(probe.latestSubmittedPrompt) == normalizedPromptText(receipt.expectedPromptText)
+            if receipt.promptConfirmationRequired,
+               !probe.latestSubmittedPrompt.isEmpty,
+               !submittedPromptMatches
+            {
+                throw CouncilProviderClientError.submittedPromptMismatch(receipt.providerID)
+            }
+
             let isNewResponse = !probe.latestFingerprint.isEmpty
                 && probe.latestBaselineToken != receipt.submissionToken
                 && !receipt.baselineResponseFingerprints.contains(probe.latestFingerprint)
-            if isNewResponse, !probe.isStreaming, !probe.text.isEmpty {
+            let responseBelongsToSubmittedPrompt = !receipt.promptConfirmationRequired
+                || probe.responseFollowsSubmittedPrompt
+            if submittedPromptMatches,
+               responseBelongsToSubmittedPrompt,
+               isNewResponse,
+               !probe.isStreaming,
+               !probe.text.isEmpty
+            {
                 if probe.text == lastCandidate {
                     stableProbeCount += 1
                 } else {
@@ -326,9 +347,17 @@ final class WebViewHub: ObservableObject, CouncilProviderClient {
         try await waitUntilReady(providerID, timeout: 30, requireNavigationCycle: true)
 
         let adapter = try requiredAdapter(for: providerID)
-        let probe = try await completionProbe(providerID: providerID, webView: webView, adapter: adapter)
-        guard probe.responseCount == 0 else {
-            throw CouncilProviderClientError.freshConversationNotEmpty(providerID, probe.responseCount)
+        var blankProbeCount = 0
+        while blankProbeCount < 3 {
+            let probe = try await completionProbe(providerID: providerID, webView: webView, adapter: adapter)
+            let existingMessageCount = probe.responseCount + probe.submittedPromptCount
+            guard existingMessageCount == 0 else {
+                throw CouncilProviderClientError.freshConversationNotEmpty(providerID, existingMessageCount)
+            }
+            blankProbeCount += 1
+            if blankProbeCount < 3 {
+                try await Task.sleep(for: .milliseconds(500))
+            }
         }
     }
 
@@ -395,11 +424,20 @@ final class WebViewHub: ObservableObject, CouncilProviderClient {
             responseFingerprints: Set(dictionary["responseFingerprints"] as? [String] ?? []),
             latestFingerprint: dictionary["latestFingerprint"] as? String ?? "",
             latestBaselineToken: dictionary["latestBaselineToken"] as? String ?? "",
+            submittedPromptCount: dictionary["submittedPromptCount"] as? Int ?? 0,
+            latestSubmittedPrompt: dictionary["latestSubmittedPrompt"] as? String ?? "",
+            responseFollowsSubmittedPrompt: dictionary["responseFollowsSubmittedPrompt"] as? Bool ?? false,
             text: dictionary["text"] as? String ?? "",
             isStreaming: dictionary["isStreaming"] as? Bool ?? false,
             rateLimited: dictionary["rateLimited"] as? Bool ?? false,
             rateLimitMessage: dictionary["rateLimitMessage"] as? String ?? ""
         )
+    }
+
+    private func normalizedPromptText(_ text: String) -> String {
+        text.components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     private func requiredWebView(for providerID: ProviderID) throws -> WKWebView {
@@ -433,6 +471,9 @@ private struct ProviderCompletionProbe {
     let responseFingerprints: Set<String>
     let latestFingerprint: String
     let latestBaselineToken: String
+    let submittedPromptCount: Int
+    let latestSubmittedPrompt: String
+    let responseFollowsSubmittedPrompt: Bool
     let text: String
     let isStreaming: Bool
     let rateLimited: Bool
