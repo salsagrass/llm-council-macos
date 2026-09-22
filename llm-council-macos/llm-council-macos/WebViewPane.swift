@@ -10,6 +10,27 @@ import SwiftUI
 import WebKit
 
 @MainActor
+enum WebJavaScriptBridge {
+    static func evaluate(_ script: String, in webView: WKWebView) async throws -> Any? {
+        try await webView.callAsyncJavaScript(
+            asyncFunctionBody(for: script),
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+    }
+
+    static func asyncFunctionBody(for script: String) -> String {
+        var expression = script.trimmingCharacters(in: .whitespacesAndNewlines)
+        while expression.last == ";" {
+            expression.removeLast()
+            expression = expression.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return "return await (\n\(expression)\n);"
+    }
+}
+
+@MainActor
 final class WebViewHub: ObservableObject, CouncilProviderClient {
     private static let supportedURLSchemes: Set<String> = ["http", "https"]
 
@@ -382,15 +403,7 @@ final class WebViewHub: ObservableObject, CouncilProviderClient {
     }
 
     private func evaluate(_ script: String, in webView: WKWebView) async throws -> Any? {
-        try await withCheckedThrowingContinuation { continuation in
-            webView.evaluateJavaScript(script) { value, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(returning: value)
-                }
-            }
-        }
+        try await WebJavaScriptBridge.evaluate(script, in: webView)
     }
 
     func setGlobalZoom(_ zoom: Double) {

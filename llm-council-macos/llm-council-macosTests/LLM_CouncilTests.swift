@@ -8,6 +8,7 @@ import AppKit
 import Foundation
 @testable import LLM_Council
 import Testing
+import WebKit
 
 struct LLM_CouncilTests {
     @MainActor
@@ -30,6 +31,27 @@ struct LLM_CouncilTests {
         window.makeFirstResponder(nil)
         CouncilComposerTextView.applyFocusRequest(true, to: textView)
         #expect(window.firstResponder === textView)
+    }
+
+    @MainActor
+    @Test("WebKit bridge awaits Promise results and returns serializable values")
+    func webKitBridgeAwaitsPromiseResults() async throws {
+        let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        let navigationWaiter = WebViewNavigationWaiter()
+        try await navigationWaiter.load("<html><body>ready</body></html>", in: webView)
+
+        let value = try await WebJavaScriptBridge.evaluate(
+            """
+            (async function() {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+              return { ok: true, method: "promise" };
+            })();
+            """,
+            in: webView
+        )
+        let result = try #require(value as? [String: Any])
+        #expect(result["ok"] as? Bool == true)
+        #expect(result["method"] as? String == "promise")
     }
 
     @MainActor
@@ -353,6 +375,34 @@ struct LLM_CouncilTests {
         chrome.selectWorkspace()
         #expect(chrome.selectedProviderID == nil)
         #expect(chrome.sidebarSelection == .workspace)
+    }
+}
+
+@MainActor
+private final class WebViewNavigationWaiter: NSObject, WKNavigationDelegate {
+    private var continuation: CheckedContinuation<Void, Error>?
+
+    func load(_ html: String, in webView: WKWebView) async throws {
+        webView.navigationDelegate = self
+        try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+            webView.loadHTMLString(html, baseURL: nil)
+        }
+    }
+
+    func webView(_: WKWebView, didFinish _: WKNavigation!) {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    func webView(_: WKWebView, didFail _: WKNavigation!, withError error: Error) {
+        continuation?.resume(throwing: error)
+        continuation = nil
+    }
+
+    func webView(_: WKWebView, didFailProvisionalNavigation _: WKNavigation!, withError error: Error) {
+        continuation?.resume(throwing: error)
+        continuation = nil
     }
 }
 
